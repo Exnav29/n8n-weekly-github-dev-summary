@@ -84,67 +84,63 @@ This variant is included to demonstrate direct Anthropic integration. The end-to
 
 ## Architecture
 
-The workflow is intentionally designed as a set of controlled handoffs rather than one long happy-path chain. The main path collects evidence, validates it before the AI layer, validates the AI output before delivery, and separates retryable provider failures from conditions that should stop for review.
+The diagram below shows the **Bulletproof main workflow as one execution path**. A decision node has only one Yes path and one No path. Where several GitHub calls are required, the successful path moves into a collection stage that fans out to those calls and then rejoins before validation.
 
 ```mermaid
 flowchart TD
     A[Friday Schedule Trigger] --> B[Load Configuration]
     B --> C{Preflight Valid?}
 
-    C -- No --> X1[Stop with explicit validation error]
-    C -- Yes --> D1[Fetch GitHub Commits]
-    C -- Yes --> D2[Fetch Closed Issues]
-    C -- Yes --> D3[Fetch Merged Pull Requests]
+    C -- No --> X1[Stop: configuration error]
+    C -- Yes --> D[Collect GitHub Activity]
+
+    D --> D1[Fetch Commits]
+    D --> D2[Fetch Closed Issues]
+    D --> D3[Fetch Merged Pull Requests]
 
     D1 --> E[Aggregate GitHub Activity]
     D2 --> E
     D3 --> E
 
-    E --> F{GitHub Contract Valid?}
-    F -- No --> X2[Stop with contract error]
+    E --> F{GitHub Data Valid?}
+    F -- No --> X2[Stop: contract error]
     F -- Yes --> G[Build Structured Brief + Prompt]
 
     G --> H[n8n AI Agent]
-    H --> I1[Claude via OpenRouter]
-    H --> I2[Claude via Anthropic]
-
-    I1 --> J[Generated Engineering Report]
-    I2 --> J
+    H --> I[Claude Model Provider]
+    I --> J[Generated Engineering Report]
 
     J --> K{AI Output Valid?}
-    K -- No --> X3[Stop with output validation error]
+    K -- No --> X3[Stop: output validation error]
     K -- Yes --> L{Delivery Enabled?}
 
-    L -- No --> M[Stop Cleanly]
+    L -- No --> M[Finish without posting]
     L -- Yes --> N[Post Report to Discord]
+    N --> O[Workflow Complete]
 
-    D1 -. transient failure .-> R[Bounded Retry]
-    D2 -. transient failure .-> R
-    D3 -. transient failure .-> R
-    N -. transient failure .-> R
-    R -. retry succeeds .-> E
-    R -. retries exhausted .-> ERR[Workflow Failure]
-
-    X1 --> ERR
-    X2 --> ERR
-    X3 --> ERR
-    ERR -. optional .-> OW[Separate n8n Error Workflow]
-    OW --> OP[Operator Notification]
+    X1 -. unrecovered failure .-> ERR[Optional Error Workflow]
+    X2 -. unrecovered failure .-> ERR
+    X3 -. unrecovered failure .-> ERR
+    D1 -. after retries exhausted .-> ERR
+    D2 -. after retries exhausted .-> ERR
+    D3 -. after retries exhausted .-> ERR
+    N -. after retries exhausted .-> ERR
+    ERR --> OP[Operator Notification]
 ```
 
-### What the diagram is meant to show
+### How to read the diagram
 
-**Evidence first.** GitHub activity is collected and normalized before Claude sees it. The model is not asked to discover the source facts itself.
+**One successful path out of each decision.** Preflight validation does not have three separate Yes outcomes. A valid configuration enters one collection stage; that stage then makes the three GitHub requests required for the report.
 
-**Validation at both boundaries.** The Bulletproof edition validates the GitHub response contract before AI processing and validates the generated report before delivery. A successful API call is not automatically treated as a successful business outcome.
+**Parallel collection, then one handoff.** Commits, closed issues, and merged pull requests are separate inputs, but they rejoin at `Aggregate GitHub Activity`. Downstream validation and AI processing operate on the combined weekly evidence.
 
-**Different failures get different treatment.** Temporary GitHub, Discord, or network failures are candidates for bounded retry. Missing configuration, malformed data, and incomplete AI output stop explicitly instead of being retried blindly.
+**One model provider per workflow execution.** `Claude Model Provider` represents whichever model connection is configured in that workflow. The live-tested reference uses OpenRouter; the direct-Anthropic reference uses Anthropic. They are alternatives, not two model calls made during the same run.
 
-**Alerting is separated from the business workflow.** The optional Error Trigger workflow handles operator notification without adding alerting branches throughout the main automation.
+**Retries belong to the external calls.** GitHub and Discord calls can retry transient failures. If those retries are exhausted, the workflow fails and the optional Error Workflow can notify an operator. Validation errors are not retried blindly.
 
-**The model-provider layer is replaceable.** The live-tested path uses Claude through OpenRouter, while a second reference workflow demonstrates direct Anthropic integration. The GitHub collection, validation, prompt construction, and delivery architecture remain the same.
+**Validation occurs before and after AI.** GitHub data is checked before it becomes an AI prompt, and the generated report is checked before it can be delivered. A green API response by itself is not treated as proof of a valid business result.
 
-See [`docs/architecture.md`](docs/architecture.md) for the design rationale and the reliability decisions behind each stage.
+See [`docs/architecture.md`](docs/architecture.md) for the deeper design rationale and reliability decisions behind each stage.
 
 ## Example report structure
 
