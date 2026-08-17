@@ -84,41 +84,67 @@ This variant is included to demonstrate direct Anthropic integration. The end-to
 
 ## Architecture
 
-```text
-Schedule Trigger
-      |
-Configuration
-      |
-Preflight Validation              [Bulletproof edition]
-      |
-GitHub Commits
-      |
-Closed Issues
-      |
-Merged Pull Requests
-      |
-GitHub Contract Validation        [Bulletproof edition]
-      |
-Build Structured Brief
-      |
-AI Agent + Claude
-      |
-AI Output Validation              [Bulletproof edition]
-      |
-Delivery Enabled?
-     / \
-   Yes  No
-    |    |
-Discord  Stop cleanly
+The workflow is intentionally designed as a set of controlled handoffs rather than one long happy-path chain. The main path collects evidence, validates it before the AI layer, validates the AI output before delivery, and separates retryable provider failures from conditions that should stop for review.
 
-Failure at any stage
-      |
-Optional n8n Error Workflow
-      |
-Operator Notification
+```mermaid
+flowchart TD
+    A[Friday Schedule Trigger] --> B[Load Configuration]
+    B --> C{Preflight Valid?}
+
+    C -- No --> X1[Stop with explicit validation error]
+    C -- Yes --> D1[Fetch GitHub Commits]
+    C -- Yes --> D2[Fetch Closed Issues]
+    C -- Yes --> D3[Fetch Merged Pull Requests]
+
+    D1 --> E[Aggregate GitHub Activity]
+    D2 --> E
+    D3 --> E
+
+    E --> F{GitHub Contract Valid?}
+    F -- No --> X2[Stop with contract error]
+    F -- Yes --> G[Build Structured Brief + Prompt]
+
+    G --> H[n8n AI Agent]
+    H --> I1[Claude via OpenRouter]
+    H --> I2[Claude via Anthropic]
+
+    I1 --> J[Generated Engineering Report]
+    I2 --> J
+
+    J --> K{AI Output Valid?}
+    K -- No --> X3[Stop with output validation error]
+    K -- Yes --> L{Delivery Enabled?}
+
+    L -- No --> M[Stop Cleanly]
+    L -- Yes --> N[Post Report to Discord]
+
+    D1 -. transient failure .-> R[Bounded Retry]
+    D2 -. transient failure .-> R
+    D3 -. transient failure .-> R
+    N -. transient failure .-> R
+    R -. retry succeeds .-> E
+    R -. retries exhausted .-> ERR[Workflow Failure]
+
+    X1 --> ERR
+    X2 --> ERR
+    X3 --> ERR
+    ERR -. optional .-> OW[Separate n8n Error Workflow]
+    OW --> OP[Operator Notification]
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the design rationale.
+### What the diagram is meant to show
+
+**Evidence first.** GitHub activity is collected and normalized before Claude sees it. The model is not asked to discover the source facts itself.
+
+**Validation at both boundaries.** The Bulletproof edition validates the GitHub response contract before AI processing and validates the generated report before delivery. A successful API call is not automatically treated as a successful business outcome.
+
+**Different failures get different treatment.** Temporary GitHub, Discord, or network failures are candidates for bounded retry. Missing configuration, malformed data, and incomplete AI output stop explicitly instead of being retried blindly.
+
+**Alerting is separated from the business workflow.** The optional Error Trigger workflow handles operator notification without adding alerting branches throughout the main automation.
+
+**The model-provider layer is replaceable.** The live-tested path uses Claude through OpenRouter, while a second reference workflow demonstrates direct Anthropic integration. The GitHub collection, validation, prompt construction, and delivery architecture remain the same.
+
+See [`docs/architecture.md`](docs/architecture.md) for the design rationale and the reliability decisions behind each stage.
 
 ## Example report structure
 
